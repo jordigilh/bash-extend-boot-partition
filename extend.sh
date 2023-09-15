@@ -26,7 +26,7 @@ function print_help(){
     echo " This command will increase the boot partition in /dev/vdb by 1G and reduce the next in line partition in the device by the equal amount."
 }
 
-function is_device_mounted() {
+function ensure_device_not_mounted() {
     /usr/bin/findmnt --source "$1" 1>&2>/dev/null
     status=$?
     if [[  status -eq 0 ]]; then
@@ -75,7 +75,7 @@ function validate_increment_partition_size() {
 # capture and validate amount of space to increase for boot
 function parse_flags() {
     if [[ -z $1 ]] && [[ -z $2 ]]; then
-        display_help
+        print_help
         exit 1
     fi
     validate_device_name "$1"
@@ -98,8 +98,8 @@ function get_boot_partition_number() {
         echo "Invalid boot partition number '$BOOT_PARTITION_NUMBER'"
         exit 1
     fi
-    is_device_mounted "$DEVICE_NAME$BOOT_PARTITION_NUMBER"
-    is_ext4 "$DEVICE_NAME$BOOT_PARTITION_NUMBER"
+    ensure_device_not_mounted "$DEVICE_NAME$BOOT_PARTITION_NUMBER"
+    ensure_fs_is_ext4 "$DEVICE_NAME$BOOT_PARTITION_NUMBER"
 }
 
 
@@ -127,7 +127,7 @@ function get_successive_partition_number() {
         echo "Invalid successive partition number '$SUCCESSIVE_PARTITION_NUMBER'"
         exit 1
     fi
-    is_device_mounted "$DEVICE_NAME""$SUCCESSIVE_PARTITION_NUMBER"
+    ensure_device_not_mounted "$DEVICE_NAME""$SUCCESSIVE_PARTITION_NUMBER"
 }
 
 function init_variables(){
@@ -188,7 +188,7 @@ function get_device_type(){
     echo "$val"
 }
 
-function is_ext4(){
+function ensure_fs_is_ext4(){
     local device=$1
     fstype=$(/usr/bin/lsblk -fs "$device" --noheadings -o FSTYPE -d| /usr/bin/awk 'NF { $1=$1; print }')
     local status=$?
@@ -245,8 +245,8 @@ function check_device(){
         # if it's a logical volume then use the mapped device name
         device=$LOGICAL_VOLUME_DEVICE_NAME
     fi
-    is_device_mounted "$device"
-    is_ext4 "$device"
+    ensure_device_not_mounted "$device"
+    ensure_fs_is_ext4 "$device"
     check_filesystem "$device"
     check_filesystem_size "$device"
 }

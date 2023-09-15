@@ -8,8 +8,23 @@ DEVICE_NAME=
 BOOT_PARTITION_NUMBER=
 SUCCESSIVE_PARTITION_NUMBER=
 BOOT_PARTITION_FLAG="boot"
+EXTENDED_PARTITION_TYPE=extended
 LOGICAL_VOLUME_DEVICE_NAME=
 INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES=
+
+
+function print_help(){
+    echo "Script to extend the ext4 boot partition using BIOS by reducing the partition size of the adjacent partition by a given amount."
+    echo "It only works with ext4 file systems and supports both standard partitions with ext4 and partitions with LVM hosting ext4 file systems."
+    echo ""
+    echo "The script determines which partition number is the boot partition by looking for the boot flag. This process won't work with an EFI boot partition because the boot partition that contains the kernel and the initramfs are in a partition that does not have the flag."
+    echo ""
+    echo "Usage: $(basename "$0") <device_name> <increase_size>"
+    echo ""
+    echo "Example"
+    echo " $>$(basename "$0") /dev/vdb 1G"
+    echo " This command will increase the boot partition in /dev/vdb by 1G and reduce the next in line partition in the device by the equal amount."
+}
 
 function is_device_mounted() {
     /usr/bin/findmnt --source "$1" 1>&2>/dev/null
@@ -24,10 +39,12 @@ function validate_device_name() {
     DEVICE_NAME="$1"
     if [[ -z "$DEVICE_NAME" ]]; then
         echo "Missing device name"
+        print_help
         exit 1
     fi
     if [[ ! -e "$DEVICE_NAME" ]]; then 
         echo "Device $DEVICE_NAME not found"
+        print_help
         exit 1
     fi
     err=$(/usr/sbin/fdisk -l "$DEVICE_NAME" 2>&1)
@@ -57,6 +74,10 @@ function validate_increment_partition_size() {
 # capture and validate the device name that holds the partition
 # capture and validate amount of space to increase for boot
 function parse_flags() {
+    if [[ -z $1 ]] && [[ -z $2 ]]; then
+        display_help
+        exit 1
+    fi
     validate_device_name "$1"
     validate_increment_partition_size "$2"
 }
@@ -93,8 +114,15 @@ function get_successive_partition_number() {
         echo "No boot partition found"
         exit 1
     fi
-    # get the partition number from the next line after the boot partition 
-    SUCCESSIVE_PARTITION_NUMBER=$(/usr/sbin/parted -m "$DEVICE_NAME" print | /usr/bin/sed -n -e '/^'"$BOOT_PARTITION_NUMBER"':/{n;p;}' -e h| /usr/bin/awk -F':' '{print $1}')
+    # get the extended partition number in case there is one, we will need to shrink it as well
+    EXTENDED_PARTITION_NUMBER=$(/usr/sbin/parted "$DEVICE_NAME" print | /usr/bin/sed -n '/'"$EXTENDED_PARTITION_TYPE"'/p'|awk '{print $1}')
+    if [[ -n "$EXTENDED_PARTITION_NUMBER" ]]; then
+      # if there's an extended partition, use the last one as the target partition to shrink
+      SUCCESSIVE_PARTITION_NUMBER=$(/usr/sbin/parted "$DEVICE_NAME" print |grep -v "^$" |awk 'END{print$1}')
+    else
+        # get the partition number from the next line after the boot partition
+        SUCCESSIVE_PARTITION_NUMBER=$(/usr/sbin/parted "$DEVICE_NAME" print | /usr/bin/awk '/'"$BOOT_PARTITION_FLAG"'/{getline;print $1}')
+    fi
     if ! [[ $SUCCESSIVE_PARTITION_NUMBER == +([[:digit:]]) ]]; then
         echo "Invalid successive partition number '$SUCCESSIVE_PARTITION_NUMBER'"
         exit 1
@@ -108,25 +136,34 @@ function init_variables(){
     get_successive_partition_number
 }
 
-function calculate_expected_resized_file_system_size_in_blocks(){
-    device=$1
+function check_filesystem(){
+    local device=$1
     # Retrieve the estimated minimum size in bytes that the device can be shrank
-    ret=$(/usr/sbin/e2fsck -f -y "$device" 2>&1)
-    status=$?
+    ret=$(/usr/sbin/e2fsck -fy "$device" 2>&1)
+    local status=$?
     if [[ status -ne 0 ]]; then
-        echo "File system check failed for $device: $ret"
-        exit $status
+        echo "Warning: File system check failed for $device: $ret"
     fi
-    total_block_count=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block count:/{print $3}')
+}
+
+function convert_size_to_fs_blocks(){
+    local device=$1
+    local size=$2
     block_size_in_bytes=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block size:/{print $3}')
-    increment_boot_partition_in_blocks=$(( INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES / block_size_in_bytes ))
+    echo $(( size / block_size_in_bytes ))
+}
+
+function calculate_expected_resized_file_system_size_in_blocks(){
+    local device=$1
+    increment_boot_partition_in_blocks=$(convert_size_to_fs_blocks "$device" "$INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES")
+    total_block_count=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block count:/{print $3}')
     new_fs_size_in_blocks=$(( total_block_count - increment_boot_partition_in_blocks ))
     echo $new_fs_size_in_blocks
 }
 
 
 function check_filesystem_size() {
-    device=$1
+    local device=$1
     new_fs_size_in_blocks=$(calculate_expected_resized_file_system_size_in_blocks "$device")
     # it is possible that running this command after resizing it might give an even smaller number. 
     minimum_blocks_required=$(/usr/sbin/resize2fs -P "$device" 2> /dev/null | /usr/bin/awk  '{print $NF}')
@@ -143,7 +180,7 @@ function check_filesystem_size() {
 
 function get_device_type(){
     val=$( /usr/sbin/pvs --noheadings -o NAME,fmt | /usr/bin/sed -n 's#'"$DEVICE_NAME""$SUCCESSIVE_PARTITION_NUMBER"' ##p' | /usr/bin/awk 'NF { $1=$1; print }' 2>&1)
-    status=$?
+    local status=$?
     if [[ status -ne 0 ]]; then
         echo "Failed to retrieve device type: $val"
         exit 1
@@ -152,9 +189,9 @@ function get_device_type(){
 }
 
 function is_ext4(){
-    device=$1
+    local device=$1
     fstype=$(/usr/bin/lsblk -fs "$device" --noheadings -o FSTYPE -d| /usr/bin/awk 'NF { $1=$1; print }')
-    status=$?
+    local status=$?
     if [[ $status -ne 0 ]]; then
         exit $status
     fi
@@ -182,6 +219,24 @@ function resolve_device_name(){
     fi
 }
 
+
+function deactivate_volume_group(){
+    volume_group_name=$(pvs "$DEVICE_NAME""$SUCCESSIVE_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
+        exit $status
+    fi
+    ret=$(vgchange -an "$volume_group_name" 2>&1)
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to deactivate volume group $volume_group_name: $err"
+        exit $status
+    fi
+    # avoid potential deadlocks with udev rules before 
+    sleep 1
+}
+
 function check_device(){
     local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
     resolve_device_name
@@ -192,16 +247,18 @@ function check_device(){
     fi
     is_device_mounted "$device"
     is_ext4 "$device"
-    check_filesystem_size "$device"   
+    check_filesystem "$device"
+    check_filesystem_size "$device"
 }
 
 function shrink_logical_volume() {
     ret=$(/usr/sbin/lvreduce --resizefs -L -"$INCREMENT_BOOT_PARTITION_SIZE" "$LOGICAL_VOLUME_DEVICE_NAME" 2>&1)
-    status=$?
+    local status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to shrink logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
         exit $status
     fi
+    check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
 }
 
 function evict_end_PV() {
@@ -212,6 +269,7 @@ function evict_end_PV() {
         echo "Failed to move PEs in PV $LOGICAL_VOLUME_DEVICE_NAME: $ret"
         exit $status
     fi
+    check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
 }
 
 function shrink_physical_volume() {
@@ -245,11 +303,12 @@ function shrink_physical_volume() {
             echo "Failed to resize PV $device during retry: $ret"
             exit $status  
     fi
+    check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
 }
 
 function calculate_new_end_partition_size_in_bytes(){
-    local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
-    current_partition_size_in_bytes=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print| /usr/bin/awk '/^'"$SUCCESSIVE_PARTITION_NUMBER"':/ {split($0,value,":"); print value[3]}'| /usr/bin/sed -e's/B//g')
+    local device=$DEVICE_NAME$1
+    current_partition_size_in_bytes=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print| /usr/bin/awk '/^'"$1"':/ {split($0,value,":"); print value[3]}'| /usr/bin/sed -e's/B//g')
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to convert new device size to megabytes $device: $ret"
@@ -271,9 +330,18 @@ function resize_fs(){
     fi
 }
 
-function shrink_partition(){
-    local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
-    device_type=$(get_device_type "$device")
+function shrink_partition() {
+    new_end_partition_size_in_bytes=$(calculate_new_end_partition_size_in_bytes "$1")
+    ret=$(echo Yes | /usr/sbin/parted "$DEVICE_NAME" ---pretend-input-tty unit B resizepart "$1" "$new_end_partition_size_in_bytes" 2>&1 )
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to resize device $DEVICE_NAME$1 to size: $ret"
+        exit 1
+    fi
+}
+
+function shrink_target_partition(){
+    device_type=$(get_device_type "$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER")
     if [[ "$device_type" == "lvm2" ]]; then
         shrink_logical_volume
         shrink_physical_volume 
@@ -282,13 +350,11 @@ function shrink_partition(){
     else
         echo "Unknown device type $device_type"
         exit 1
-    fi    
-    new_end_partition_size_in_bytes=$(calculate_new_end_partition_size_in_bytes)
-    ret=$(echo Yes | /usr/sbin/parted "$DEVICE_NAME" ---pretend-input-tty unit B resizepart "$SUCCESSIVE_PARTITION_NUMBER" "$new_end_partition_size_in_bytes" 2>&1 )
-    status=$?
-    if [[ $status -ne 0 ]]; then
-        echo "Failed to resize device $device to size: $ret"
-        exit 1
+    fi
+    shrink_partition "$SUCCESSIVE_PARTITION_NUMBER"
+    if [[ -n "$EXTENDED_PARTITION_NUMBER" ]]; then
+        # resize the extended partition
+        shrink_partition "$EXTENDED_PARTITION_NUMBER"
     fi
 }
 
@@ -296,10 +362,36 @@ function shift_successive_partition() {
     # If boot partition is not the last one, shift the successive partition to the right to take advantage of the newly fred space. Use 'echo '<amount_to_shift>,' | sfdisk --move-data <device name> -N <partition number>
     # to shift the partition to the right.
     # The astute eye will notice that we're moving the partition, not the last logical volume in the partition.
-    ret=$(echo "+$INCREMENT_BOOT_PARTITION_SIZE,"| /usr/sbin/sfdisk --move-data "$DEVICE_NAME" -N "$SUCCESSIVE_PARTITION_NUMBER" --no-reread 2>&1)
+    local target_partition=$SUCCESSIVE_PARTITION_NUMBER
+    if [[ -n "$EXTENDED_PARTITION_NUMBER" ]]; then
+        target_partition=$EXTENDED_PARTITION_NUMBER
+    fi
+    ret=$(echo "+$INCREMENT_BOOT_PARTITION_SIZE,"| /usr/sbin/sfdisk --move-data "$DEVICE_NAME" -N "$target_partition" --force 2>&1)
     status=$?
     if [[ status -ne 0 ]]; then
-        echo "Failed to shift partition '$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER': $ret"
+        echo "Failed to shift partition '$DEVICE_NAME$target_partition': $ret"
+        exit $status
+    fi
+}
+
+function update_kernel_partition_tables(){
+    # Ensure no size inconsistencies between PV and partition
+    local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
+    device_type=$(get_device_type "$device")
+    if [[ $device_type == "lvm2" ]]; then
+        ret=$(/usr/sbin/pvresize "$device" -y 2>&1)
+        status=$?
+        if [[ status -ne 0 ]]; then
+            echo "Failed to align PV and partition sizes '$device': $ret"
+            exit $status
+        fi
+        # ensure that the VG is not active so that the changes to the kernel PT are reflected by the partx command
+        deactivate_volume_group
+    fi
+    ret=$(/usr/sbin/partprobe "$DEVICE_NAME")
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Errors found while updating the kernel's partition tables for '$device': $ret"
         exit $status
     fi
 }
@@ -309,17 +401,23 @@ function extend_boot_partition() {
     # The + tells it to shift the end to the right.
     # If the boot partition is effectivelly the last one, we're shifting the boot partition left, and then taking over the same amount of shifted space to the right,
     # essentially increasing the boot partition by as much as $INCREMENT_BOOT_PARTITION_SIZE
-    ret=$(echo "+$INCREMENT_BOOT_PARTITION_SIZE,"| /usr/sbin/sfdisk "$DEVICE_NAME" -N "$BOOT_PARTITION_NUMBER" --no-reread 2>&1)
+    ret=$(echo "- +"| /usr/sbin/sfdisk "$DEVICE_NAME" -N "$BOOT_PARTITION_NUMBER" --no-reread --force 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to shift boot partition '$DEVICE_NAME$BOOT_PARTITION_NUMBER': $ret"
+        echo "Failed to shift boot partition '$device': $ret"
         exit $status
     fi
+    local device=$DEVICE_NAME$BOOT_PARTITION_NUMBER
+    check_filesystem "$device"
+    update_kernel_partition_tables
     # Extend the boot file system with `resize2fs <boot_partition>`
-    ret=$(/usr/sbin/resize2fs "$DEVICE_NAME""$BOOT_PARTITION_NUMBER")
+    increment_boot_partition_in_blocks=$(convert_size_to_fs_blocks "$device" "$INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES")
+    total_block_count=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block count:/{print $3}')
+    new_fs_size_in_blocks=$(( total_block_count + increment_boot_partition_in_blocks ))
+    ret=$(/usr/sbin/resize2fs "$device" $new_fs_size_in_blocks 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to resize boot partition '$DEVICE_NAME$BOOT_PARTITION_NUMBER': $ret"
+        echo "Failed to resize boot partition '$device': $ret"
         exit $status
     fi
 }
@@ -329,7 +427,7 @@ function extend_boot_partition() {
 main() {
     init_variables "$1" "$2"
     check_device
-    shrink_partition
+    shrink_target_partition
     shift_successive_partition
     extend_boot_partition
 }

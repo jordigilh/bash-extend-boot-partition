@@ -12,7 +12,6 @@ EXTENDED_PARTITION_TYPE=extended
 LOGICAL_VOLUME_DEVICE_NAME=
 INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES=
 
-
 function print_help(){
     echo "Script to extend the ext4 boot partition using BIOS by reducing the partition size of the adjacent partition by a given amount."
     echo "It only works with ext4 file systems and supports both standard partitions with ext4 and partitions with LVM hosting ext4 file systems."
@@ -263,7 +262,8 @@ function shrink_logical_volume() {
 
 function evict_end_PV() {
     local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
-    ret=$(/usr/sbin/pvmove --alloc anywhere "$device":"$1"- "$device":0-"$1" 2>&1)
+    local shrinking_start_PE=$1
+    ret=$(/usr/sbin/pvmove --alloc anywhere "$device":"$shrinking_start_PE"- "$device":0-"$shrinking_start_PE" 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then        
         echo "Failed to move PEs in PV $LOGICAL_VOLUME_DEVICE_NAME: $ret"
@@ -275,17 +275,14 @@ function evict_end_PV() {
 function shrink_physical_volume() {
     local device=$DEVICE_NAME$SUCCESSIVE_PARTITION_NUMBER
     pe_size_in_bytes=$(/usr/sbin/pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
-    mod_delta=$((INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES % pe_size_in_bytes))
-    if [[ "$mod_delta" != 0 ]];then
-        INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES=$((INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES+mod_delta))
-    fi
+    unusable_space_in_pv_in_bytes=$(/usr/sbin/pvdisplay --units B $device | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
+
     total_pe_count=$(/usr/sbin/pvs "$device" -o pv_pe_count --noheadings | /usr/bin/sed 's/^[[:space:]]*//g') 
     evict_size_in_PE=$((INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES/pe_size_in_bytes))
     shrink_start_PE=$((total_pe_count - evict_size_in_PE))
-
-    pv_new_size_in_bytes=$(( shrink_start_PE*pe_size_in_bytes ))
-    pv_new_size_formatted=$(/usr/bin/numfmt --to=iec $pv_new_size_in_bytes --format %.2f)
-    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_formatted" -t "$device" -y 2>&1)
+    pv_new_size_in_bytes=$(( (shrink_start_PE*pe_size_in_bytes) + unusable_space_in_pv_in_bytes ))
+    
+    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B -t "$device" -y 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
         if [[ $status -eq 5 ]]; then
@@ -297,7 +294,7 @@ function shrink_physical_volume() {
             exit $status
         fi
     fi
-    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_formatted" "$device" -y 2>&1)
+    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B "$device" -y 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
             echo "Failed to resize PV $device during retry: $ret"

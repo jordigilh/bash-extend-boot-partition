@@ -222,13 +222,13 @@ function resolve_device_name(){
 
 function deactivate_volume_group(){
     local volume_group_name
-    volume_group_name=$(pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+    volume_group_name=$(/usr/sbin/pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
         exit $status
     fi
-    ret=$(vgchange -an "$volume_group_name" 2>&1)
+    ret=$(/usr/sbin/vgchange -an "$volume_group_name" 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to deactivate volume group $volume_group_name: $err"
@@ -342,7 +342,7 @@ function shrink_partition() {
 }
 
 function shrink_adjacent_partition(){
-    local device_type=
+    local device_type
     device_type=$(get_device_type "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER")
     if [[ "$device_type" == "lvm2" ]]; then
         shrink_logical_volume
@@ -429,13 +429,13 @@ function activate_volume_group(){
     device_type=$(get_device_type "$device")
     if [[ $device_type == "lvm2" ]]; then
         local volume_group_name
-        volume_group_name=$(pvs "$device" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+        volume_group_name=$(/usr/sbin/pvs "$device" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
         status=$?
         if [[ $status -ne 0 ]]; then
             echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
             exit $status
         fi
-        ret=$(vgchange -ay "$volume_group_name" 2>&1)
+        ret=$(/usr/sbin/vgchange -ay "$volume_group_name" 2>&1)
         status=$?
         if [[ $status -ne 0 ]]; then
             echo "Failed to activate volume group $volume_group_name: $err"

@@ -28,6 +28,7 @@ This script requires the following binaries to work:
 * /usr/sbin/e2fsck
 * /usr/sbin/fdisk
 * /usr/bin/findmnt
+* /usr/bin/wc
 
 # Building sfdisk from the source
 There are known issues with the `move-data` flag in `sfdisk` prior to v2.38.1 that could cause loss of data when performing the move operation. If your environment lacks a version of `sfdisk` equal or greater than v2.38.1 you will need to update it to a version equal or greater than 2.38.1. In case of older systems where there are no prebuild rpms available, you'll need to build it directly from the source.  
@@ -62,5 +63,5 @@ Here are the recommended steps to install `sfdisk` version 2.38.1 in your enviro
 
 * Replace your existing `sfdisk` with the new binary:
 ```
-[root@localhost ~]# mv sfdisk.static /usr/bin/sfdisk
+[root@localhost ~]# cp sfdisk.static /usr/bin/sfdisk
 ```

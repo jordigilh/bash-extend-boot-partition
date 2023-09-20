@@ -90,7 +90,7 @@ function get_boot_partition_number() {
         echo "Unable to identify boot partition number for '$DEVICE_NAME': $BOOT_PARTITION_NUMBER"
         exit 1
     fi
-    if [[ "$(wc -l <<<"$BOOT_PARTITION_NUMBER")" -ne "1" ]]; then
+    if [[ "$(/usr/bin/wc -l <<<"$BOOT_PARTITION_NUMBER")" -ne "1" ]]; then
         echo "Found multiple partitions with the boot flag enabled for device $DEVICE_NAME"
         exit 1
     fi

@@ -47,10 +47,10 @@ function validate_device_name() {
         print_help
         exit 1
     fi
-    err=$(/usr/sbin/fdisk -l "$DEVICE_NAME" 2>&1)
+    ret=$(/usr/sbin/fdisk -l "$DEVICE_NAME" 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to open device $DEVICE_NAME: $err"
+        echo "Failed to open device $DEVICE_NAME: $ret"
         exit 1
     fi
 }
@@ -222,16 +222,17 @@ function resolve_device_name(){
 
 function deactivate_volume_group(){
     local volume_group_name
-    volume_group_name=$(/usr/sbin/pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+    ret=$(/usr/sbin/pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
     status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
+        echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $ret"
         exit $status
     fi
+    volume_group_name=$ret
     ret=$(/usr/sbin/vgchange -an "$volume_group_name" 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to deactivate volume group $volume_group_name: $err"
+        echo "Failed to deactivate volume group $volume_group_name: $ret"
         exit $status
     fi
     # avoid potential deadlocks with udev rules before continuing
@@ -256,7 +257,7 @@ function shrink_logical_volume() {
     ret=$(/usr/sbin/lvreduce --resizefs -L -"$INCREMENT_BOOT_PARTITION_SIZE" "$LOGICAL_VOLUME_DEVICE_NAME" 2>&1)
     local status=$?
     if [[ $status -ne 0 ]]; then
-        echo "Failed to shrink logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
+        echo "Failed to shrink logical volume $LOGICAL_VOLUME_DEVICE_NAME: $ret"
         exit $status
     fi
     check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
@@ -429,16 +430,17 @@ function activate_volume_group(){
     device_type=$(get_device_type "$device")
     if [[ $device_type == "lvm2" ]]; then
         local volume_group_name
-        volume_group_name=$(/usr/sbin/pvs "$device" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+        ret=$(/usr/sbin/pvs "$device" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
         status=$?
         if [[ $status -ne 0 ]]; then
-            echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $err"
+            echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $ret"
             exit $status
         fi
+        volume_group_name=$ret
         ret=$(/usr/sbin/vgchange -ay "$volume_group_name" 2>&1)
         status=$?
         if [[ $status -ne 0 ]]; then
-            echo "Failed to activate volume group $volume_group_name: $err"
+            echo "Failed to activate volume group $volume_group_name: $ret"
             exit $status
         fi
         # avoid potential deadlocks with udev rules before continuing

@@ -12,12 +12,13 @@ BOOT_FS_TYPE=
 EXTENDED_PARTITION_TYPE=extended
 LOGICAL_VOLUME_DEVICE_NAME=
 INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES=
+SHRINK_SIZE_IN_BYTES=
 
 function print_help(){
     echo ""
     echo "Script to extend the ext4/xfs boot partition in a BIOS system by shifting the adjacent partition to the boot partition by the parametrized size."
-    echo "It expects the device to have enough free space to shift to the right, that is towards the end of the device, the adjacent partition."
-    echo "It only works with ext4 and xfs file systems and supports both primary partitions and logical partitions."
+    echo "It expects the device to have enough free space to shift to the right of the adjacent partition, that is towards the end of the device."
+    echo "It only works with ext4 and xfs file systems and supports adjacent partitions as primary or logical partitions and LVM in the partition."
     echo ""
     echo "The script determines which partition number is the boot partition by looking for the boot flag."
     echo "This process won't work with an EFI boot partition because the boot partition that contains the kernel and the initramfs are in a partition that does not have the flag."
@@ -26,11 +27,25 @@ function print_help(){
     echo "Usage: $(basename "$0") <device_name> <increase_size_with_units>"
     echo ""
     echo "Example"
-    echo " $>$(basename "$0") /dev/vdb 1G"
-    echo " or"
-    echo " $>$(basename "$0") /dev/vdb 1073741824"
+    echo " Given this device partition:"
+    echo "   Number  Start   End     Size    Type      File system  Flags"
+    echo "           32.3kB  1049kB  1016kB            Free Space"
+    echo "   1       1049kB  11.1GB  11.1GB  primary   ext4         boot"
+    echo "   2       11.1GB  32.2GB  21.1GB  extended"
+    echo "   5       11.1GB  32.2GB  21.1GB  logical   ext4"
     echo ""
-    echo " This command will increase the boot partition in /dev/vdb by 1G and shift the adjacent partition in the device by the equal amount."
+    echo " Running the command:"
+    echo "   $>$(basename "$0") /dev/vdb 1G"
+    echo " or"
+    echo "   $>$(basename "$0") /dev/vdb 1073741824"
+    echo ""
+    echo " Will increase the boot partition in /dev/vdb by 1G and shift the adjacent partition in the device by the equal amount."
+    echo ""
+    echo "   Number  Start   End     Size    Type      File system  Flags"
+    echo "           32.3kB  1049kB  1016kB            Free Space"
+    echo "   1       1049kB  12.2GB  12.2GB  primary   ext4         boot"
+    echo "   2       12.2GB  32.2GB  20.0GB  extended"
+    echo "   5       12.2GB  32.2GB  20.0GB  logical   ext4" 
 }
 
 function get_device_type(){
@@ -197,6 +212,8 @@ function init_variables(){
     get_successive_partition_number
 }
 
+
+
 function check_filesystem(){
     local device=$1
     # Retrieve the estimated minimum size in bytes that the device can be shrank
@@ -222,17 +239,9 @@ function calculate_expected_resized_file_system_size_in_blocks(){
     echo $new_fs_size_in_blocks
 }
 
-function check_free_device_size() {
+function get_free_device_size() {
     free_space=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print free | /usr/bin/awk -F':'  '/'"^$ADJACENT_PARTITION_NUMBER:"'/{getline;print $0}'|awk -F':' '/free/{print $4}'|sed -e 's/B//g')
-    if [[ -z $free_space ]]; then
-        echo "No free space available in device $DEVICE_NAME after partition #$ADJACENT_PARTITION_NUMBER"
-        exit 1
-    fi
-    
-    if [[ $INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES -gt $free_space ]]; then
-        echo "Unable to extend boot partition: Available free space after partition $ADJACENT_PARTITION_NUMBER (""$free_space"" bytes) is smaller than the required size of ""$INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES"" bytes" >&2
-        exit 1
-    fi
+    echo "$free_space"
 }
 
 function get_volume_group_name(){
@@ -258,14 +267,143 @@ function deactivate_volume_group(){
     sleep 1
 }
 
+
+function check_available_free_space(){
+    local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
+    free_device_space_in_bytes=$(get_free_device_size)
+    # if there is enough free space after the adjacent partition, there is no need to shrink it.
+    if [[ $free_device_space_in_bytes -gt $INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES ]]; then
+        SHRINK_SIZE_IN_BYTES=0
+        return
+    fi
+    SHRINK_SIZE_IN_BYTES=$((INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES-free_device_space_in_bytes))
+    device_type=$(get_device_type "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER")
+    if [[ "$device_type" == "lvm" ]]; then
+        # there is not enough free space after the adjacent partition, calculate how much extra space is needed
+        # to be fred from the PV
+        pe_size_in_bytes=$(/usr/sbin/pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
+        unusable_space_in_pv_in_bytes=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
+        free_pe_count=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"Free PE") {print $3}')
+        # factor in the unusable space to match the required number of free PEs
+        required_pe_count=$(((SHRINK_SIZE_IN_BYTES+unusable_space_in_pv_in_bytes)/pe_size_in_bytes))
+        if [[ $required_pe_count -gt $free_pe_count ]]; then
+            echo "Not enough available free PE in $device: Required $required_pe_count but found $free_pe_count"
+            exit 1
+        fi
+    fi
+}
+
+function resolve_device_name(){
+    local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
+    device_type=$(get_device_type "$device")
+    if [[ $device_type == "lvm" ]]; then
+        # It's an LVM block device 
+        # Determine which is the last LV in the PV
+        # shellcheck disable=SC2016
+        device=$(/usr/sbin/pvdisplay "$device" -m | /usr/bin/sed  -n '/Logical volume/h; ${x;p;}' | /usr/bin/awk  '{print $3}')
+        status=$?
+        if [[ status -ne 0 ]]; then
+            echo "Failed to identify the last LV in $device"
+            exit $status
+        fi
+        # Capture the LV device name
+        LOGICAL_VOLUME_DEVICE_NAME=$device
+    fi
+}
+
+
 function check_device(){
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
-    local fs_type
-    fs_type=$(get_fs_type "$device")
-    if [[ "$fs_type" == "ext4" ]]; then
-        ensure_device_not_mounted "$device"
+    resolve_device_name
+    ensure_device_not_mounted "$device"
+    check_available_free_space
+}
+
+function evict_end_PV() {
+    local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
+    local shrinking_start_PE=$1
+    ret=$(/usr/sbin/pvmove --alloc anywhere "$device":"$shrinking_start_PE"-  2>&1)
+    status=$?
+    if [[ $status -ne 0 ]]; then        
+        echo "Failed to move PEs in PV $LOGICAL_VOLUME_DEVICE_NAME: $ret"
+        exit $status
     fi
-    check_free_device_size
+    check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
+}
+
+
+function shrink_physical_volume() {
+    local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
+    pe_size_in_bytes=$(/usr/sbin/pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
+    unusable_space_in_pv_in_bytes=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
+
+    total_pe_count=$(/usr/sbin/pvs "$device" -o pv_pe_count --noheadings | /usr/bin/sed 's/^[[:space:]]*//g') 
+    evict_size_in_PE=$((SHRINK_SIZE_IN_BYTES/pe_size_in_bytes))
+    shrink_start_PE=$((total_pe_count - evict_size_in_PE))
+    pv_new_size_in_bytes=$(( (shrink_start_PE*pe_size_in_bytes) + unusable_space_in_pv_in_bytes ))
+    
+    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B -t "$device" -y 2>&1)
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        if [[ $status -eq 5 ]]; then
+            # ERRNO 5 is equivalent to command failed: https://github.com/lvmteam/lvm2/blob/2eb34edeba8ffc9e22b6533e9cb20e0b5e93606b/tools/errors.h#L23
+            # Try to recover by evicting the ending PEs elsewhere in the PV, in case it's a failure due to ending PE's being inside the shrinking area.
+            evict_end_PV $shrink_start_PE
+        else 
+            echo "Failed to resize PV $device: $ret"
+            exit $status
+        fi
+    fi
+    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B "$device" -y 2>&1)
+    status=$?
+    if [[ $status -ne 0 ]]; then
+            echo "Failed to resize PV $device during retry: $ret"
+            exit $status  
+    fi
+    check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
+}
+
+function calculate_new_end_partition_size_in_bytes(){
+    local partition_number=$1
+    local device=$DEVICE_NAME$partition_number
+    current_partition_size_in_bytes=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print| /usr/bin/awk '/^'"$partition_number"':/ {split($0,value,":"); print value[3]}'| /usr/bin/sed -e's/B//g')
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to convert new device size to megabytes $device: $ret"
+        exit 1
+    fi
+
+    new_partition_size_in_bytes=$(( current_partition_size_in_bytes - SHRINK_SIZE_IN_BYTES))
+    echo "$new_partition_size_in_bytes"
+}
+
+function shrink_partition() {
+    local partition_number=$1
+    new_end_partition_size_in_bytes=$(calculate_new_end_partition_size_in_bytes "$partition_number")
+    ret=$(echo Yes | /usr/sbin/parted "$DEVICE_NAME" ---pretend-input-tty unit B resizepart "$partition_number" "$new_end_partition_size_in_bytes" 2>&1 )
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to resize device $DEVICE_NAME$partition_number to size: $ret"
+        exit 1
+    fi
+}
+
+
+function shrink_adjacent_partition(){
+    if [[ $SHRINK_SIZE_IN_BYTES -eq 0 ]]; then
+        # no need to shrink the PV or the partition as there is already enough free available space after the partition holding the PV
+        return 0
+    fi
+    local device_type
+    device_type=$(get_device_type "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER")
+    if [[ "$device_type" == "lvm" ]]; then
+        shrink_physical_volume 
+    fi
+    shrink_partition "$ADJACENT_PARTITION_NUMBER"
+    if [[ -n "$EXTENDED_PARTITION_NUMBER" ]]; then
+        # resize the extended partition
+        shrink_partition "$EXTENDED_PARTITION_NUMBER"
+    fi
 }
 
 function shift_adjacent_partition() {
@@ -368,9 +506,10 @@ function cleanup(){
 main() {
     init_variables "$1" "$2"
     check_device
+    shrink_adjacent_partition
     shift_adjacent_partition
     extend_boot_partition
     cleanup
 }
 
-main "$@"
+#main "$@"init_var  

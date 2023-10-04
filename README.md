@@ -1,12 +1,40 @@
 # bash-extend-boot-partition
-Script to extend the ext4 boot partition using BIOS by reducing the partition size of the adjacent partition by a given amount. It only works with ext4 file systems and supports both standard partitions with ext4 and partitions with LVM hosting ext4 file systems.
+Script to extend the ext4/xfs boot partition in a BIOS system by shifting the adjacent partition to the boot partition by the parametrized size.
+It expects the device to have enough free space to shift to the right of the adjacent partition, that is towards the end of the device. The free space
+can come as already free space between the adjacent partition to boot and the subsequent partition or end of disk or, in case of devices containing an LVM partition,
+free PEs in the PV that holds the adjacent partition to boot.
 
-The script determines which partition number is the boot partition by looking for the boot flag. This process won't work with an EFI boot partition because the boot partition that contains the kernel and the initramfs are in a partition that does not have the flag.
 
-Usage: extend.sh <device_name> <increase_size>
+<img src="./extend_boot_partition_with_LVM.svg">
+
+It only works with ext4 and xfs file systems and supports adjacent partitions as primary or logical partitions and LVM in the partition.
+
+The script determines which partition number is the boot partition by looking for the boot flag.
+This process won't work with an EFI boot partition because the boot partition that contains the kernel and the initramfs are in a partition that does not have the flag.
+The parametrized size supports M for MiB and G for GiB. If no units is given, it is interpreted as bytes
+
+Usage: $>extend.sh <device_name> <increase_size_with_units>
 
 Example
-    `$>resize.sh /dev/vdb 1G`
+ Given this device partition:
+   Number  Start   End     Size    Type      File system  Flags
+           32.3kB  1049kB  1016kB            Free Space
+   1       1049kB  11.1GB  11.1GB  primary   ext4         boot
+   2       11.1GB  32.2GB  21.1GB  extended
+   5       11.1GB  32.2GB  21.1GB  logical   ext4
+
+ Running the command:
+   $>extend.sh /dev/vdb 1G
+ or
+   $>extend.sh /dev/vdb 1073741824
+
+ Will increase the boot partition in /dev/vdb by 1G and shift the adjacent partition in the device by the equal amount.
+
+   Number  Start   End     Size    Type      File system  Flags
+           32.3kB  1049kB  1016kB            Free Space
+   1       1049kB  12.2GB  12.2GB  primary   ext4         boot
+   2       12.2GB  32.2GB  20.0GB  extended
+   5       12.2GB  32.2GB  20.0GB  logical   ext4 
 
 
 # Dependencies

@@ -14,7 +14,7 @@ LOGICAL_VOLUME_DEVICE_NAME=
 INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES=
 SHRINK_SIZE_IN_BYTES=
 
-function print_help(){
+print_help(){
     echo ""
     echo "Script to extend the ext4/xfs boot partition in a BIOS system by shifting the adjacent partition to the boot partition by the parametrized size."
     echo "It expects the device to have enough free space to shift to the right of the adjacent partition, that is towards the end of the device."
@@ -48,7 +48,7 @@ function print_help(){
     echo "   5       12.2GB  32.2GB  20.0GB  logical   ext4" 
 }
 
-function get_device_type(){
+get_device_type(){
     local device=$1
     val=$(lsblk "$device" -o type --noheadings 2>&1)
     local status=$?
@@ -56,26 +56,22 @@ function get_device_type(){
         echo "Failed to retrieve device type for $device: $val"
         exit 1
     fi
-    type=$(awk -F' ' 'END{print}'<<<"$val")
+    type=$(tail -n1 <<<"$val")
     if [[ -z $type ]]; then
         echo "Unknown device type for $device"
         exit 1
     fi
-    if [[ $val == *"lvm"* ]]; then
-        echo "lvm"
-    else
-        echo "part"
-    fi
+    echo "$type"
 }
 
-function ensure_device_not_mounted() {
+ensure_device_not_mounted() {
     local device=$1
     local devices_to_check
     device_type=$(get_device_type "$device")
     if [[ $device_type == "lvm" ]]; then
         # It's an LVM block device 
         # Capture the LV device names. Since we'll have to shift the partition, we need to make sure all LVs are not mounted in the adjacent partition.
-        devices_to_check=$(pvdisplay "$device" -m |grep "Logical volume" |awk '{print $3}')
+        devices_to_check=$(/usr/sbin/lvm pvdisplay "$device" -m |grep "Logical volume" |awk '{print $3}')
     else 
         # Use the device and partition number instead
         devices_to_check=$device
@@ -90,7 +86,7 @@ function ensure_device_not_mounted() {
     done
 }
 
-function validate_device_name() {
+validate_device_name() {
     DEVICE_NAME="$1"
     if [[ -z "$DEVICE_NAME" ]]; then
         echo "Missing device name"
@@ -110,7 +106,7 @@ function validate_device_name() {
     fi
 }
 
-function validate_increment_partition_size() {
+validate_increment_partition_size() {
     INCREMENT_BOOT_PARTITION_SIZE="$1"
     if [[ -z "$INCREMENT_BOOT_PARTITION_SIZE" ]]; then
         echo "Missing incremental size for boot partition"
@@ -128,7 +124,7 @@ function validate_increment_partition_size() {
 
 # capture and validate the device name that holds the partition
 # capture and validate amount of space to increase for boot
-function parse_flags() {
+parse_flags() {
     if [[ -z $1 ]] && [[ -z $2 ]]; then
         print_help
         exit 1
@@ -138,7 +134,7 @@ function parse_flags() {
 }
 
 
-function get_fs_type(){
+get_fs_type(){
     local device=$1
     ret=$(blkid "$device" -o udev | sed -n -e 's/ID_FS_TYPE=//p' 2>&1)
     status=$?
@@ -149,7 +145,7 @@ function get_fs_type(){
 }
 
 
-function ensure_extendable_fs_type(){
+ensure_extendable_fs_type(){
     local device=$1
     ret=$(get_fs_type "$device")
     if [[ "$ret" != "ext4" ]] && [[ "$ret" != "xfs" ]]; then
@@ -159,7 +155,7 @@ function ensure_extendable_fs_type(){
     BOOT_FS_TYPE=$ret
 }
 
-function get_boot_partition_number() {
+get_boot_partition_number() {
     BOOT_PARTITION_NUMBER=$(/usr/sbin/parted -m "$DEVICE_NAME" print  | /usr/bin/sed -n '/^[0-9]*:/p'| /usr/bin/sed -n '/'$BOOT_PARTITION_FLAG'/p'| /usr/bin/awk -F':' '{print $1}')
     status=$?
     if [[ $status -ne 0 ]]; then
@@ -179,7 +175,7 @@ function get_boot_partition_number() {
 }
 
 
-function get_successive_partition_number() {
+get_successive_partition_number() {
     boot_line_number=$(/usr/sbin/parted -m "$DEVICE_NAME" print |/usr/bin/sed -n '/^'"$BOOT_PARTITION_NUMBER"':/ {=}')
     status=$?
     if [[ $status -ne 0 ]]; then
@@ -206,7 +202,7 @@ function get_successive_partition_number() {
     ensure_device_not_mounted "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER"
 }
 
-function init_variables(){
+init_variables(){
     parse_flags "$1" "$2"
     get_boot_partition_number
     get_successive_partition_number
@@ -214,8 +210,13 @@ function init_variables(){
 
 
 
-function check_filesystem(){
+check_filesystem(){
     local device=$1
+    fstype=$(get_fs_type "$device")
+    if [[ "$fstype" == "swap" ]]; then
+     echo "Warning: cannot run fsck to a swap partition for $device"
+     return 0
+    fi
     # Retrieve the estimated minimum size in bytes that the device can be shrank
     ret=$(/usr/sbin/e2fsck -fy "$device" 2>&1)
     local status=$?
@@ -224,14 +225,14 @@ function check_filesystem(){
     fi
 }
 
-function convert_size_to_fs_blocks(){
+convert_size_to_fs_blocks(){
     local device=$1
     local size=$2
     block_size_in_bytes=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block size:/{print $3}')
     echo $(( size / block_size_in_bytes ))
 }
 
-function calculate_expected_resized_file_system_size_in_blocks(){
+calculate_expected_resized_file_system_size_in_blocks(){
     local device=$1
     increment_boot_partition_in_blocks=$(convert_size_to_fs_blocks "$device" "$INCREMENT_BOOT_PARTITION_SIZE_IN_BYTES")
     total_block_count=$(/usr/sbin/tune2fs -l "$device" | /usr/bin/awk '/Block count:/{print $3}')
@@ -239,14 +240,14 @@ function calculate_expected_resized_file_system_size_in_blocks(){
     echo $new_fs_size_in_blocks
 }
 
-function get_free_device_size() {
+get_free_device_size() {
     free_space=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print free | /usr/bin/awk -F':'  '/'"^$ADJACENT_PARTITION_NUMBER:"'/{getline;print $0}'|awk -F':' '/free/{print $4}'|sed -e 's/B//g')
     echo "$free_space"
 }
 
-function get_volume_group_name(){
+get_volume_group_name(){
     local volume_group_name
-    ret=$(/usr/sbin/pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
+    ret=$(/usr/sbin/lvm pvs "$DEVICE_NAME""$ADJACENT_PARTITION_NUMBER" -o vg_name --noheadings|/usr/bin/sed 's/^[[:space:]]*//g')
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to retrieve volume group name for logical volume $LOGICAL_VOLUME_DEVICE_NAME: $ret"
@@ -254,10 +255,10 @@ function get_volume_group_name(){
     fi
     echo "$ret"
 }
-function deactivate_volume_group(){
+deactivate_volume_group(){
     local volume_group_name
     volume_group_name=$(get_volume_group_name)
-    ret=$(/usr/sbin/vgchange -an "$volume_group_name" 2>&1)
+    ret=$(/usr/sbin/lvm vgchange -an "$volume_group_name" 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to deactivate volume group $volume_group_name: $ret"
@@ -268,7 +269,7 @@ function deactivate_volume_group(){
 }
 
 
-function check_available_free_space(){
+check_available_free_space(){
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
     free_device_space_in_bytes=$(get_free_device_size)
     # if there is enough free space after the adjacent partition, there is no need to shrink it.
@@ -281,9 +282,9 @@ function check_available_free_space(){
     if [[ "$device_type" == "lvm" ]]; then
         # there is not enough free space after the adjacent partition, calculate how much extra space is needed
         # to be fred from the PV
-        pe_size_in_bytes=$(/usr/sbin/pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
-        unusable_space_in_pv_in_bytes=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
-        free_pe_count=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"Free PE") {print $3}')
+        pe_size_in_bytes=$(/usr/sbin/lvm pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
+        unusable_space_in_pv_in_bytes=$(/usr/sbin/lvm pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
+        free_pe_count=$(/usr/sbin/lvm pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"Free PE") {print $3}')
         # factor in the unusable space to match the required number of free PEs
         required_pe_count=$(((SHRINK_SIZE_IN_BYTES+unusable_space_in_pv_in_bytes)/pe_size_in_bytes))
         if [[ $required_pe_count -gt $free_pe_count ]]; then
@@ -293,14 +294,14 @@ function check_available_free_space(){
     fi
 }
 
-function resolve_device_name(){
+resolve_device_name(){
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
     device_type=$(get_device_type "$device")
     if [[ $device_type == "lvm" ]]; then
         # It's an LVM block device 
         # Determine which is the last LV in the PV
         # shellcheck disable=SC2016
-        device=$(/usr/sbin/pvdisplay "$device" -m | /usr/bin/sed  -n '/Logical volume/h; ${x;p;}' | /usr/bin/awk  '{print $3}')
+        device=$(/usr/sbin/lvm pvdisplay "$device" -m | /usr/bin/sed  -n '/Logical volume/h; ${x;p;}' | /usr/bin/awk  '{print $3}')
         status=$?
         if [[ status -ne 0 ]]; then
             echo "Failed to identify the last LV in $device"
@@ -312,17 +313,17 @@ function resolve_device_name(){
 }
 
 
-function check_device(){
+check_device(){
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
     resolve_device_name
     ensure_device_not_mounted "$device"
     check_available_free_space
 }
 
-function evict_end_PV() {
+evict_end_PV() {
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
     local shrinking_start_PE=$1
-    ret=$(/usr/sbin/pvmove --alloc anywhere "$device":"$shrinking_start_PE"-  2>&1)
+    ret=$(/usr/sbin/lvm pvmove --alloc anywhere "$device":"$shrinking_start_PE"-  2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then        
         echo "Failed to move PEs in PV $LOGICAL_VOLUME_DEVICE_NAME: $ret"
@@ -332,17 +333,17 @@ function evict_end_PV() {
 }
 
 
-function shrink_physical_volume() {
+shrink_physical_volume() {
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
-    pe_size_in_bytes=$(/usr/sbin/pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
-    unusable_space_in_pv_in_bytes=$(/usr/sbin/pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
+    pe_size_in_bytes=$(/usr/sbin/lvm pvdisplay "$device" --units b| /usr/bin/awk 'index($0,"PE Size") {print $3}')
+    unusable_space_in_pv_in_bytes=$(/usr/sbin/lvm pvdisplay --units B "$device" | /usr/bin/awk 'index($0,"not usable") {print $(NF-1)}'|/usr/bin/numfmt --from=iec)
 
-    total_pe_count=$(/usr/sbin/pvs "$device" -o pv_pe_count --noheadings | /usr/bin/sed 's/^[[:space:]]*//g') 
+    total_pe_count=$(/usr/sbin/lvm pvs "$device" -o pv_pe_count --noheadings | /usr/bin/sed 's/^[[:space:]]*//g') 
     evict_size_in_PE=$((SHRINK_SIZE_IN_BYTES/pe_size_in_bytes))
     shrink_start_PE=$((total_pe_count - evict_size_in_PE))
     pv_new_size_in_bytes=$(( (shrink_start_PE*pe_size_in_bytes) + unusable_space_in_pv_in_bytes ))
     
-    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B -t "$device" -y 2>&1)
+    ret=$(/usr/sbin/lvm pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B -t "$device" -y 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
         if [[ $status -eq 5 ]]; then
@@ -354,7 +355,7 @@ function shrink_physical_volume() {
             exit $status
         fi
     fi
-    ret=$(/usr/sbin/pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B "$device" -y 2>&1)
+    ret=$(/usr/sbin/lvm pvresize --setphysicalvolumesize "$pv_new_size_in_bytes"B "$device" -y 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
             echo "Failed to resize PV $device during retry: $ret"
@@ -363,7 +364,7 @@ function shrink_physical_volume() {
     check_filesystem "$LOGICAL_VOLUME_DEVICE_NAME"
 }
 
-function calculate_new_end_partition_size_in_bytes(){
+calculate_new_end_partition_size_in_bytes(){
     local partition_number=$1
     local device=$DEVICE_NAME$partition_number
     current_partition_size_in_bytes=$(/usr/sbin/parted -m "$DEVICE_NAME" unit b print| /usr/bin/awk '/^'"$partition_number"':/ {split($0,value,":"); print value[3]}'| /usr/bin/sed -e's/B//g')
@@ -377,7 +378,7 @@ function calculate_new_end_partition_size_in_bytes(){
     echo "$new_partition_size_in_bytes"
 }
 
-function shrink_partition() {
+shrink_partition() {
     local partition_number=$1
     new_end_partition_size_in_bytes=$(calculate_new_end_partition_size_in_bytes "$partition_number")
     ret=$(echo Yes | /usr/sbin/parted "$DEVICE_NAME" ---pretend-input-tty unit B resizepart "$partition_number" "$new_end_partition_size_in_bytes" 2>&1 )
@@ -389,7 +390,7 @@ function shrink_partition() {
 }
 
 
-function shrink_adjacent_partition(){
+shrink_adjacent_partition(){
     if [[ $SHRINK_SIZE_IN_BYTES -eq 0 ]]; then
         # no need to shrink the PV or the partition as there is already enough free available space after the partition holding the PV
         return 0
@@ -406,7 +407,7 @@ function shrink_adjacent_partition(){
     fi
 }
 
-function shift_adjacent_partition() {
+shift_adjacent_partition() {
     # If boot partition is not the last one, shift the successive partition to the right to take advantage of the newly fred space. Use 'echo '<amount_to_shift>,' | sfdisk --move-data <device name> -N <partition number>
     # to shift the partition to the right.
     # The astute eye will notice that we're moving the partition, not the last logical volume in the partition.
@@ -422,29 +423,28 @@ function shift_adjacent_partition() {
     fi
 }
 
-function update_kernel_partition_tables(){
+update_kernel_partition_tables(){
     # Ensure no size inconsistencies between PV and partition
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
     device_type=$(get_device_type "$device")
     if [[ $device_type == "lvm" ]]; then
-        ret=$(/usr/sbin/pvresize "$device" -y 2>&1)
+        ret=$(/usr/sbin/lvm pvresize "$device" -y 2>&1)
         status=$?
         if [[ status -ne 0 ]]; then
             echo "Failed to align PV and partition sizes '$device': $ret"
             exit $status
         fi
-        # ensure that the VG is not active so that the changes to the kernel PT are reflected by the partx command
+        # ensure that the VG is not active so that the changes to the kernel PT are reflected by the partprobe command
         deactivate_volume_group
     fi
-    ret=$(/usr/sbin/partprobe "$DEVICE_NAME")
-    status=$?
-    if [[ $status -ne 0 ]]; then
-        echo "Errors found while updating the kernel's partition tables for '$device': $ret"
-        exit $status
+    /usr/sbin/partprobe "$DEVICE_NAME" 2>&1
+    if [[ $device_type == "lvm" ]]; then
+        # reactivate volume group
+        activate_volume_group
     fi
 }
 
-function extend_boot_partition() {
+extend_boot_partition() {
     # Resize the boot partition by extending it to take the available space: parted <device> resizepart <partition number> +<extra size>/ check sfdisk as an alternative option)
     # The + tells it to shift the end to the right.
     # If the boot partition is effectivelly the last one, we're shifting the boot partition left, and then taking over the same amount of shifted space to the right,
@@ -454,7 +454,7 @@ function extend_boot_partition() {
     status=$?
     if [[ $status -ne 0 ]]; then
         echo "Failed to shift boot partition '$device': $ret"
-        exit $status
+        return
     fi
     check_filesystem "$device"
     update_kernel_partition_tables
@@ -470,35 +470,30 @@ function extend_boot_partition() {
         status=$?
     else
         echo "Device $device does not contain an ext4 or xfs file system: $BOOT_FS_TYPE"
-        exit 1
+        return 
     fi
     if [[ $status -ne 0 ]]; then
         echo "Failed to resize boot partition '$device': $ret"
-        exit $status
+        return 
     fi
 }
 
-function activate_volume_group(){
+activate_volume_group(){
     local device=$DEVICE_NAME$ADJACENT_PARTITION_NUMBER
-    device_type=$(get_device_type "$device")
-    if [[ $device_type == "lvm" ]]; then
-        local volume_group_name
-        volume_group_name=$(get_volume_group_name)
-        ret=$(/usr/sbin/vgchange -ay "$volume_group_name" 2>&1)
-        status=$?
-        if [[ $status -ne 0 ]]; then
-            echo "Failed to activate volume group $volume_group_name: $ret"
-            exit $status
-        fi
-        # avoid potential deadlocks with udev rules before continuing
-        sleep 1
+    local volume_group_name
+    volume_group_name=$(get_volume_group_name)
+    ret=$(/usr/sbin/lvm vgchange -ay "$volume_group_name" 2>&1)
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        echo "Failed to activate volume group $volume_group_name: $ret"
+        exit $status
     fi
+    # avoid potential deadlocks with udev rules before continuing
+    sleep 1
 }
 
 # last steps are to run the fsck on boot partition and activate the volume gruop if necessary
-function cleanup(){
-    # activate the volume group belonging to the adjacent partition if necessary.
-    activate_volume_group
+cleanup(){
     # run a file system check to the boot file system
     check_filesystem "$DEVICE_NAME""$BOOT_PARTITION_NUMBER"
 }
@@ -512,4 +507,4 @@ main() {
     cleanup
 }
 
-#main "$@"init_var  
+main "$@"

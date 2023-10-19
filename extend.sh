@@ -16,7 +16,7 @@ SHRINK_SIZE_IN_BYTES=
 
 print_help(){
     echo ""
-    echo "Script to extend the ext4/xfs boot partition in a BIOS system by shifting the adjacent partition to the boot partition by the parametrized size."
+    echo "Script to increase the ext4/xfs boot partition in a BIOS system by shifting the adjacent partition to the boot partition by the parametrized size."
     echo "It expects the device to have enough free space to shift to the right of the adjacent partition, that is towards the end of the device."
     echo "It only works with ext4 and xfs file systems and supports adjacent partitions as primary or logical partitions and LVM in the partition."
     echo ""
@@ -444,7 +444,7 @@ update_kernel_partition_tables(){
     fi
 }
 
-extend_boot_partition() {
+increase_boot_partition() {
     # Resize the boot partition by extending it to take the available space: parted <device> resizepart <partition number> +<extra size>/ check sfdisk as an alternative option)
     # The + tells it to shift the end to the right.
     # If the boot partition is effectivelly the last one, we're shifting the boot partition left, and then taking over the same amount of shifted space to the right,
@@ -503,7 +503,7 @@ main() {
     check_device
     shrink_adjacent_partition
     shift_adjacent_partition
-    extend_boot_partition
+    increase_boot_partition
     cleanup
 }
 

@@ -50,7 +50,7 @@ print_help(){
 
 get_device_type(){
     local device=$1
-    val=$(lsblk "$device" -o type --noheadings 2>&1)
+    val=$(/usr/bin/lsblk "$device" -o type --noheadings 2>&1)
     local status=$?
     if [[ status -ne 0 ]]; then
         echo "Failed to retrieve device type for $device: $val"
@@ -71,7 +71,7 @@ ensure_device_not_mounted() {
     if [[ $device_type == "lvm" ]]; then
         # It's an LVM block device 
         # Capture the LV device names. Since we'll have to shift the partition, we need to make sure all LVs are not mounted in the adjacent partition.
-        devices_to_check=$(/usr/sbin/lvm pvdisplay "$device" -m |grep "Logical volume" |awk '{print $3}')
+        devices_to_check=$(/usr/sbin/lvm pvdisplay "$device" -m |/usr/bin/grep "Logical volume" |/usr/bin/awk '{print $3}')
     else 
         # Use the device and partition number instead
         devices_to_check=$device
@@ -136,7 +136,7 @@ parse_flags() {
 
 get_fs_type(){
     local device=$1
-    ret=$(blkid "$device" -o udev | sed -n -e 's/ID_FS_TYPE=//p' 2>&1)
+    ret=$(/usr/sbin/blkid "$device" -o udev | sed -n -e 's/ID_FS_TYPE=//p' 2>&1)
     status=$?
     if [[ $status -ne 0 ]]; then
         exit $status
